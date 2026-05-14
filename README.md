@@ -14,9 +14,14 @@ printf "say ready" | tmuxlet -p -
 
 Requirements:
 
-- Rust and Cargo
-- `tmux` on `PATH`
+- [Rust](https://www.rust-lang.org/tools/install) and
+  [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
+- [`tmux`](https://github.com/tmux/tmux/wiki/Installing) on `PATH`
 - At least one supported target CLI, such as `claude` or `codex`
+
+Rust's recommended installer is `rustup`, which installs Cargo with the Rust
+toolchain. See the [rustup installation guide](https://rust-lang.github.io/rustup/installation/index.html)
+for advanced install options.
 
 Install from GitHub:
 
@@ -45,6 +50,26 @@ Some coding CLIs have useful behavior tied to a user's local subscription, auth
 state, tools, and terminal session. `tmuxlet` keeps that runtime in tmux and
 gives callers a blocking `-p` style interface for OpenClaw, Paperclip, scripts,
 and other local automation.
+
+## Origin
+
+This started from the mistaken assumption that `claude -p` could not be used as
+the local execution bridge for OpenClaw-style workflows. That assumption came
+during the early-2026 panic around using Claude subscription OAuth tokens in
+third-party harnesses: [community timelines](https://metricnexus.ai/blog/is-openclaw-allowed-in-claude-code)
+point to January/February 2026 token blocks and ToS clarification, and by
+[April 4, 2026](https://www.techradar.com/pro/bad-news-claude-users-anthropic-says-youll-need-to-pay-to-use-openclaw-now)
+Anthropic had said Claude subscriptions would no longer cover third-party
+harnesses such as OpenClaw without separate usage billing. TechCrunch also
+[reported on April 10, 2026](https://techcrunch.com/2026/04/10/anthropic-temporarily-banned-openclaws-creator-from-accessing-claude/)
+that OpenClaw's creator was temporarily suspended, while noting Anthropic said
+it had not banned people simply for using OpenClaw.
+
+The useful distinction was: do not extract or reuse subscription OAuth inside a
+third-party service; instead, drive the user's local, official CLI in tmux. The
+first experiment was [`CodefiLabs/tq`](https://github.com/CodefiLabs/tq), short
+for "tmux queue." `tmuxlet` is a narrower print-mode CLI built from those
+lessons, not a deprecation notice for `tq`.
 
 ## Targets
 
