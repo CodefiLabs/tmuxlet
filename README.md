@@ -46,10 +46,29 @@ cargo run -- -p "say ready"
 
 ## Why
 
-Some coding CLIs have useful behavior tied to a user's local subscription, auth
-state, tools, and terminal session. `tmuxlet` keeps that runtime in tmux and
-gives callers a blocking `-p` style interface for OpenClaw, Paperclip, scripts,
-and other local automation.
+On June 15, 2026, [Anthropic split Claude subscriptions into two billing pools](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan): interactive Claude Code keeps drawing from your regular subscription usage limits, but `claude -p` and the Claude Agent SDK now drain from a separate monthly Agent SDK credit ($20 on Pro, $100 on Max 5x, $200 on Max 20x).
+
+In practice, the regular subscription bucket is worth many times the Agent SDK credit in equivalent API-rate tokens. A $200 Max plan that comfortably runs Claude Code interactively all day under the subscription limit caps out far sooner under the $200 Agent SDK credit.
+
+`tmuxlet` runs the target CLI in its normal interactive mode inside tmux, pastes the prompt as if a user typed it, and waits for a structured completion signal. From Claude's perspective it's a normal interactive session. From your script's perspective it's a `claude -p`-style blocking call returning text or JSON.
+
+The same wrapper works against Codex, Gemini, opencode, pi, and Cursor — one normalized print-mode interface across six coding CLIs. Useful for OpenClaw, Paperclip, scheduled scripts, and any other local automation that wants a blocking `-p` call against the user's local, official CLI without extracting OAuth tokens.
+
+## Why not just `claude -p`?
+
+Five reasons, in roughly the order most people care:
+
+**1. Billing pool.** After June 15, 2026, `claude -p` and Agent SDK calls drain from the separate Agent SDK credit ($20 / $100 / $200 by plan). `claude` interactive draws from the regular subscription usage limits, which on a Max plan are worth substantially more than that credit in equivalent API spend. `tmuxlet` runs Claude in interactive mode and drives it from the outside, so programmatic workflows can use the larger subscription bucket. ([Anthropic's announcement](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan).)
+
+**2. Multi-CLI normalization.** `claude -p` is Claude-only. `tmuxlet` wraps Claude, Codex, Gemini, opencode, pi, and Cursor with one normalized flag set (`--continue`, `--resume`, `--session-id`, `--cwd`, `--model`, `--dangerously-skip-permissions`). Unsupported combinations fail fast instead of being silently dropped.
+
+**3. Reliable completion signal.** Parsing stdout from `claude -p` is fragile when the target streams partial output or hits a confirmation prompt. `tmuxlet` uses an explicit completion contract — the target writes `answer.txt` and calls `tmuxlet bridge complete`. You get a clean `text` / `json` payload, or a structured `blocked` / `timeout` / `exited` status with a `pane.log` for debugging.
+
+**4. Full terminal context.** tmux gives the target a real TTY, real environment, real MCP server config, real allowed-tools settings, and real auth state. Some CLIs behave differently when they detect they're not interactive — running them in tmux removes the ambiguity.
+
+**5. Confirmation handling.** During the startup window, `tmuxlet` watches the pane for known confirmation gates and sends Enter up to three times. If a run stalls later on a permission prompt, you get a `blocked` status with the captured pane content instead of an indefinite hang.
+
+**Caveat:** reason #1 depends on Anthropic continuing to price interactive Claude Code and `claude -p` from separate pools. If they unify those buckets, that argument goes away — but the other four still hold, and the multi-CLI piece becomes the main reason.
 
 ## Origin
 
@@ -70,6 +89,8 @@ third-party service; instead, drive the user's local, official CLI in tmux. The
 first experiment was [`CodefiLabs/tq`](https://github.com/CodefiLabs/tq), short
 for "tmux queue." `tmuxlet` is a narrower print-mode CLI built from those
 lessons, not a deprecation notice for `tq`.
+
+On May 14, 2026, Anthropic [reversed the April policy](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) — third-party agent harnesses are now officially supported with the new Agent SDK credit starting June 15. `tmuxlet` is the open-source bridge that works either way: against the regular subscription pool via interactive tmux drive (this README's main path), or against the Agent SDK credit if you prefer to use `claude -p` directly. Same harness, your billing call.
 
 ## Targets
 
