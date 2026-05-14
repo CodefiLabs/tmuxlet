@@ -123,6 +123,37 @@ tmuxlet -p --target codex --session-id 01984d2f-... "continue the fix"
 tmuxlet -p --target opencode --resume ses_abc123 "check status"
 ```
 
+## Resuming Target Sessions
+
+`tmuxlet` creates a fresh tmux run for each print-mode invocation, but it can
+ask the target CLI inside that run to continue one of the target's own prior
+conversation sessions. The normalized controls are:
+
+- `--continue`: continue the latest session where the target supports that
+  concept.
+- `--resume`: resume the latest session or open the target's picker where the
+  target supports a value-less resume mode.
+- `--resume <id>`: resume a specific target session id.
+- `--session <id>`: pass a target-native session selector for CLIs that expose
+  `--session`.
+- `--session-id <id>`: pass an explicit normalized session id; tmuxlet maps it
+  to the target's native resume/session flag.
+
+These flags select the target CLI conversation, not the `tmuxlet` run id under
+`~/.tmuxlet/runs/<run-id>/`. They are mutually exclusive, so use only one per
+launch.
+
+Target mappings:
+
+| Target | Latest session | Explicit session id | Notes |
+| --- | --- | --- | --- |
+| `claude` | `--continue` or `--resume` | `--resume <id>` or `--session-id <id>` | `--session` is not supported for Claude. |
+| `gemini` | `--continue` or value-less `--resume` maps to `--resume latest` | `--resume <id>` | `--session` and `--session-id` are not supported for Gemini. |
+| `codex` | `--continue` or value-less `--resume` maps to `codex resume --last` | `--resume <id>` or `--session-id <id>` maps to `codex resume <id>` | `--session` is not supported for Codex. |
+| `opencode` | `--continue` | `--resume <id>`, `--session <id>`, or `--session-id <id>` maps to `--session <id>` | Value-less `--resume` is rejected; use `--continue` for latest. |
+| `pi` | `--continue` or value-less `--resume` | `--resume <id>`, `--session <id>`, or `--session-id <id>` | `--session-id` maps to `--session <id>`. |
+| `cursor` / `cursor-agent` | `--continue` maps to `cursor-agent resume` | `--resume <id>` or `--session-id <id>` maps to `--resume <id>` | `--session` is not supported for Cursor. |
+
 When running through Cargo during development, Cargo's build/status lines are
 separate from tmuxlet output:
 
