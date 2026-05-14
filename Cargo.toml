@@ -1,0 +1,9 @@
+[package]
+name = "tmuxlet"
+version = "0.1.0"
+edition = "2024"
+description = "Run interactive coding CLIs through tmux with a claude -p style interface"
+license = "MIT"
+repository = "https://github.com/CodefiLabs/tmuxlet"
+
+[dependencies]
