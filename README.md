@@ -1,7 +1,7 @@
 # tmuxlet
 
-`tmuxlet` runs interactive coding CLIs inside tmux while exposing a small
-programmatic interface. 
+`tmuxlet` runs coding CLIs inside tmux while exposing a small print-mode
+programmatic interface.
 
 ```bash
 tmuxlet -p "say ready"
@@ -12,10 +12,10 @@ printf "say ready" | tmuxlet -p -
 
 ## Why
 
-Some coding CLIs have useful interactive behavior tied to a user's local
-subscription, auth state, tools, and terminal session. `tmuxlet` keeps that
-interactive runtime in tmux and gives callers a blocking `-p` style interface
-for OpenClaw, Paperclip, scripts, and other local automation.
+Some coding CLIs have useful behavior tied to a user's local subscription, auth
+state, tools, and terminal session. `tmuxlet` keeps that runtime in tmux and
+gives callers a blocking `-p` style interface for OpenClaw, Paperclip, scripts,
+and other local automation.
 
 ## Targets
 
@@ -34,7 +34,6 @@ Unsupported normalized flags fail fast instead of being ignored. Use
 ## CLI
 
 ```bash
-tmuxlet [options] [prompt]
 tmuxlet -p [options] [prompt]
 tmuxlet status
 tmuxlet read <id> [--lines N]
@@ -57,15 +56,17 @@ Important options:
   `--force`, `--dangerously-bypass-approvals-and-sandbox`
 - `--timeout <seconds>`: print-mode timeout, default 1800
 
+Non-print prompt launches are intentionally unsupported; pass `-p` for runs.
+
 Session controls are mutually exclusive. Use one of `--continue`, `--resume`,
 `--session`, or `--session-id` per launch.
 
 Examples:
 
 ```bash
-tmuxlet --target claude --continue
-tmuxlet --target codex --session-id 01984d2f-...
-tmuxlet --target opencode --resume ses_abc123
+tmuxlet -p --target claude --continue "summarize the last task"
+tmuxlet -p --target codex --session-id 01984d2f-... "continue the fix"
+tmuxlet -p --target opencode --resume ses_abc123 "check status"
 ```
 
 ## Runtime State
@@ -83,6 +84,18 @@ Runtime files live in:
 ```
 
 Set `TMUXLET_HOME` to override the state directory.
+
+## Confirmation Handling
+
+For Claude and Codex, tmuxlet passes the full prompt in the launch command with
+the user's prompt first and tmuxlet's completion contract after it. During the
+startup window, tmuxlet watches for common confirmation gates and sends `Enter`
+up to three times.
+
+If a run stalls later on a permission or confirmation prompt, tmuxlet returns a
+nonzero `blocked` status with the captured pane output. Rerun with
+`--dangerously-skip-permissions` where supported, or inspect the run with
+`tmuxlet attach <id>`.
 
 ## Development
 

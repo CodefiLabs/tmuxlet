@@ -10,6 +10,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_TARGET: &str = "claude";
 const DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
+const STARTUP_AUTO_ENTER_WINDOW_SECS: u64 = 8;
+const STARTUP_AUTO_ENTER_MAX_ATTEMPTS: usize = 3;
+const EXECUTION_STALL_SECS: u64 = 60;
+const PANE_POLL_SECS: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OutputFormat {
@@ -109,7 +113,7 @@ struct RunResult {
     elapsed_ms: u128,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TargetCommand {
     program: String,
     args: Vec<String>,
@@ -153,7 +157,7 @@ fn run() -> Result<(), String> {
                 let result = run_print(opts)?;
                 emit_result(&result)?;
             } else {
-                launch_interactive(opts)?;
+                return Err("tmuxlet currently supports print mode only; pass -p/--print".into());
             }
             Ok(())
         }
@@ -269,7 +273,6 @@ fn prompt_from(opts: &Options) -> Result<String, String> {
 }
 
 fn run_print(opts: Options) -> Result<RunResult, String> {
-    let command = target_command(&opts)?;
     ensure_tmux()?;
     let started = Instant::now();
     let run_id = make_run_id();
@@ -279,14 +282,24 @@ fn run_print(opts: Options) -> Result<RunResult, String> {
 
     let prompt = prompt_from(&opts)?;
     fs::write(&paths.prompt, &prompt).map_err(|e| format!("failed to write prompt: {e}"))?;
-
-    write_meta(&paths, &run_id, &tmux_session, &opts, &command)?;
-    start_tmux_session(&tmux_session, &opts.cwd)?;
-    send_launch_command(&tmux_session, &command)?;
-
-    thread::sleep(Duration::from_millis(700));
     let instruction = completion_prompt(&prompt, &run_id, &paths.answer);
-    paste_text(&tmux_session, &instruction)?;
+    let base_command = target_command(&opts)?;
+    let (launch_command, prompt_in_launch) =
+        command_with_prompt(base_command.clone(), &opts.target, &instruction);
+
+    write_meta(&paths, &run_id, &tmux_session, &opts, &base_command)?;
+    start_tmux_session(&tmux_session, &opts.cwd)?;
+    send_launch_command(&tmux_session, &launch_command)?;
+    if !prompt_in_launch {
+        paste_text(&tmux_session, &instruction)?;
+    }
+
+    let startup_auto_enter_deadline =
+        Instant::now() + Duration::from_secs(STARTUP_AUTO_ENTER_WINDOW_SECS);
+    let mut startup_enter_attempts = 0usize;
+    let mut last_pane = String::new();
+    let mut last_pane_changed_at = Instant::now();
+    let mut next_pane_poll = Instant::now();
 
     loop {
         if paths.complete.exists() {
@@ -304,6 +317,44 @@ fn run_print(opts: Options) -> Result<RunResult, String> {
                 completion_source: "explicit".into(),
                 elapsed_ms: started.elapsed().as_millis(),
             });
+        }
+
+        if Instant::now() >= next_pane_poll {
+            let pane = capture_pane(&tmux_session, 200).unwrap_or_default();
+            if Instant::now() <= startup_auto_enter_deadline
+                && startup_enter_attempts < STARTUP_AUTO_ENTER_MAX_ATTEMPTS
+                && is_startup_auto_enter_prompt(&pane)
+                && send_enter(&tmux_session).is_ok()
+            {
+                startup_enter_attempts += 1;
+            }
+
+            if pane != last_pane {
+                last_pane = pane;
+                last_pane_changed_at = Instant::now();
+            } else if !pane.trim().is_empty()
+                && last_pane_changed_at.elapsed() >= Duration::from_secs(EXECUTION_STALL_SECS)
+                && is_execution_confirmation_blocker(&pane)
+            {
+                fs::write(&paths.pane_log, &pane).ok();
+                fs::write(
+                    &paths.error,
+                    blocked_error_message(&opts.target, &run_id, startup_enter_attempts),
+                )
+                .ok();
+                return Ok(RunResult {
+                    id: run_id,
+                    target: opts.target,
+                    status: "blocked".into(),
+                    output: pane,
+                    output_format: opts.output_format,
+                    cwd: opts.cwd,
+                    tmux_session,
+                    completion_source: "fallback".into(),
+                    elapsed_ms: started.elapsed().as_millis(),
+                });
+            }
+            next_pane_poll = Instant::now() + Duration::from_secs(PANE_POLL_SECS);
         }
 
         if started.elapsed() >= opts.timeout {
@@ -342,18 +393,21 @@ fn run_print(opts: Options) -> Result<RunResult, String> {
     }
 }
 
-fn launch_interactive(opts: Options) -> Result<(), String> {
-    let command = target_command(&opts)?;
-    ensure_tmux()?;
-    let run_id = make_run_id();
-    let tmux_session = format!("tmuxlet-{run_id}");
-    let paths = run_paths(&run_id)?;
-    fs::create_dir_all(&paths.root).map_err(|e| format!("failed to create run dir: {e}"))?;
-    write_meta(&paths, &run_id, &tmux_session, &opts, &command)?;
-    start_tmux_session(&tmux_session, &opts.cwd)?;
-    send_launch_command(&tmux_session, &command)?;
-    println!("{tmux_session}");
-    Ok(())
+fn command_with_prompt(
+    mut command: TargetCommand,
+    target: &str,
+    final_prompt: &str,
+) -> (TargetCommand, bool) {
+    if target_accepts_prompt_argument(target) {
+        command.args.push(final_prompt.to_string());
+        (command, true)
+    } else {
+        (command, false)
+    }
+}
+
+fn target_accepts_prompt_argument(target: &str) -> bool {
+    matches!(target, "claude" | "codex")
 }
 
 fn target_command(opts: &Options) -> Result<TargetCommand, String> {
@@ -748,6 +802,78 @@ fn paste_text(tmux_session: &str, text: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
+fn send_enter(tmux_session: &str) -> Result<(), String> {
+    run_tmux([
+        OsStr::new("send-keys"),
+        OsStr::new("-t"),
+        OsStr::new(tmux_session),
+        OsStr::new("Enter"),
+    ])
+    .map(|_| ())
+}
+
+fn is_startup_auto_enter_prompt(pane: &str) -> bool {
+    let text = pane.to_ascii_lowercase();
+    contains_any(
+        &text,
+        &[
+            "press enter",
+            "press return",
+            "hit enter",
+            "enter to continue",
+            "return to continue",
+            "yes/no",
+            "[y/n]",
+            "(y/n)",
+            "allow",
+            "approve",
+            "proceed",
+            "permission",
+            "confirm",
+            "do you want to continue",
+            "continue?",
+            "requires approval",
+        ],
+    )
+}
+
+fn is_execution_confirmation_blocker(pane: &str) -> bool {
+    let text = pane.to_ascii_lowercase();
+    contains_any(
+        &text,
+        &[
+            "yes/no",
+            "[y/n]",
+            "(y/n)",
+            "allow",
+            "approve",
+            "proceed",
+            "permission",
+            "confirm",
+            "do you want to continue",
+            "continue?",
+            "requires approval",
+            "waiting for approval",
+            "press enter",
+            "press return",
+            "enter to continue",
+        ],
+    )
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn blocked_error_message(target: &str, run_id: &str, startup_enter_attempts: usize) -> String {
+    format!(
+        "blocked waiting for a confirmation or permission prompt\n\
+target: {target}\n\
+startup auto-enter attempts: {startup_enter_attempts}\n\
+hint: rerun with --dangerously-skip-permissions if supported by this target, or attach with tmuxlet attach {run_id} to resolve manually\n"
+    )
+}
+
 fn tmux_session_exists(name: &str) -> bool {
     Command::new("tmux")
         .args(["has-session", "-t", name])
@@ -1092,7 +1218,7 @@ fn shell_quote(value: &str) -> String {
 fn print_help() {
     println!(
         "tmuxlet {VERSION}\n\n\
-Usage:\n  tmuxlet [options] [prompt]\n  tmuxlet -p [options] [prompt]\n  tmuxlet <status|read|send|attach|stop>\n\n\
+Usage:\n  tmuxlet -p [options] [prompt]\n  tmuxlet <status|read|send|attach|stop>\n\n\
 Options:\n  -p, --print                         Blocking programmatic mode\n      --target <name>                  Target CLI: claude, gemini, codex, opencode, pi, cursor\n      --output-format <text|json>      Output format for tmuxlet result\n  -C, --cwd <dir>                      Working directory (--cd and --dir aliases)\n  -m, --model <model>                  Model pass-through where supported\n  -c, --continue                       Continue latest session where supported\n  -r, --resume [id]                    Resume session where supported\n      --session <id>                   Normalized session selector\n      --session-id <id>                Explicit normalized session id\n      --dangerously-skip-permissions   Normalized bypass flag (--yolo, --force aliases)\n      --target-arg <arg>               Raw target CLI escape hatch\n      --timeout <seconds>              Print-mode timeout (default: 1800)\n\n\
 Examples:\n  tmuxlet -p \"say ready\"\n  tmuxlet --target codex -p --cwd /tmp \"say ready\"\n  printf 'say ready' | tmuxlet -p -"
     );
@@ -1240,6 +1366,74 @@ mod tests {
         let opts = parse(&["--target", "cursor", "--session-id", "abc", "-p", "x"]);
         let cmd = target_command(&opts).unwrap();
         assert!(has_pair(&cmd.args, "--resume", "abc"));
+    }
+
+    #[test]
+    fn completion_prompt_keeps_user_prompt_first() {
+        let answer = PathBuf::from("/tmp/tmuxlet-answer.txt");
+        let prompt = completion_prompt("user task", "run-123", &answer);
+        assert!(prompt.starts_with("user task\n\nTMUXLET COMPLETION CONTRACT:"));
+        assert!(prompt.contains("/tmp/tmuxlet-answer.txt"));
+        assert!(prompt.contains("bridge complete --run run-123 --file /tmp/tmuxlet-answer.txt"));
+    }
+
+    #[test]
+    fn claude_launch_receives_final_prompt_argument() {
+        let opts = parse(&["--target", "claude", "--model", "sonnet", "-p", "x"]);
+        let (cmd, prompt_in_launch) =
+            command_with_prompt(target_command(&opts).unwrap(), &opts.target, "final prompt");
+        assert!(prompt_in_launch);
+        assert_eq!(cmd.args.last().map(String::as_str), Some("final prompt"));
+        assert!(has_pair(&cmd.args, "--model", "sonnet"));
+    }
+
+    #[test]
+    fn codex_launch_receives_final_prompt_argument() {
+        let opts = parse(&["--target", "codex", "--yolo", "-p", "x"]);
+        let (cmd, prompt_in_launch) =
+            command_with_prompt(target_command(&opts).unwrap(), &opts.target, "final prompt");
+        assert!(prompt_in_launch);
+        assert_eq!(cmd.args.last().map(String::as_str), Some("final prompt"));
+        assert!(
+            cmd.args
+                .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string())
+        );
+    }
+
+    #[test]
+    fn unsupported_prompt_argument_targets_use_paste_fallback() {
+        let opts = parse(&["--target", "gemini", "-p", "x"]);
+        let (cmd, prompt_in_launch) =
+            command_with_prompt(target_command(&opts).unwrap(), &opts.target, "final prompt");
+        assert!(!prompt_in_launch);
+        assert!(!cmd.args.contains(&"final prompt".to_string()));
+    }
+
+    #[test]
+    fn detects_startup_auto_enter_prompts() {
+        assert!(is_startup_auto_enter_prompt("Press Enter to continue"));
+        assert!(is_startup_auto_enter_prompt("Allow this command? Yes/No"));
+        assert!(is_startup_auto_enter_prompt("Requires approval"));
+        assert!(!is_startup_auto_enter_prompt("Here is the final answer."));
+    }
+
+    #[test]
+    fn detects_execution_confirmation_blockers() {
+        assert!(is_execution_confirmation_blocker(
+            "Tool needs permission. Approve?"
+        ));
+        assert!(is_execution_confirmation_blocker(
+            "Proceed with this action?"
+        ));
+        assert!(is_execution_confirmation_blocker("Continue? [y/n]"));
+        assert!(!is_execution_confirmation_blocker(
+            "The requested files were updated successfully."
+        ));
+    }
+
+    #[test]
+    fn blocked_status_is_failure() {
+        assert_ne!(result_status_code("blocked"), 0);
     }
 
     #[test]
